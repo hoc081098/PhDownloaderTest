@@ -18,15 +18,18 @@ class ViewController: UIViewController {
 
   @IBOutlet weak var tableView: UITableView!
 
-  private let downloader: PhDownloader = try! PhDownloaderFactory.downloader(with: .init(maxConcurrent: 2, throttleProgress: .milliseconds(500)))
+  private let downloader: PhDownloader = try! PhDownloaderFactory.downloader(with: .init(
+    maxConcurrent: 2,
+    throttleProgress: .milliseconds(500))
+  )
 
   private let disposeBag = DisposeBag()
 
-  private var items: [Item] = (0..<100).map { i in
+  private var items: [Item] = (0..<10).map { i in
       .init(
         request: .init(
           identifier: String(i),
-          url: URL(string: "https://file-examples.com/wp-content/uploads/2017/11/file_example_MP3_5MG.mp3")!,
+          url: URL(string: "https://file-examples-com.github.io/uploads/2017/04/file_example_MP4_1920_18MG.mp4")!,
           fileName: "test_file_\(i)",
           savedDir: FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)
@@ -45,16 +48,28 @@ class ViewController: UIViewController {
 
     self.downloader
       .observeState(by: self.items.map { $0.request.identifier })
+      .throttle(.milliseconds(500), latest: true, scheduler: MainScheduler.instance)
       .subscribe(onNext: { [weak self] states in
         guard let self = self else { return }
 
-        self.items = self.items.map { item in
+        let newItems: [Item] = self.items.map { item in
           var copy = item
           copy.state = states[item.request.identifier] ?? .undefined
           return copy
         }
-        self.tableView.reloadData()
-        print(states)
+
+        let indexPaths = zip(self.items, newItems)
+          .enumerated()
+          .compactMap { (index, tuple) -> IndexPath? in
+            let (old, new) = tuple
+            if old.state != new.state {
+              return IndexPath(row: index, section: 0)
+            }
+            return nil
+        }
+
+        self.items = newItems
+        self.tableView.reloadRows(at: indexPaths, with: .none)
       })
       .disposed(by: self.disposeBag)
 
@@ -83,6 +98,14 @@ extension ViewController: UITableViewDataSource, UITableViewDelegate {
     cell.detailTextLabel?.text = "\(item.state)"
 
     return cell
+  }
+
+  func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+    tableView.deselectRow(at: indexPath, animated: true)
+    self.downloader
+      .cancel(by: self.items[indexPath.row].request.identifier)
+      .subscribe()
+      .disposed(by: self.disposeBag)
   }
 }
 
