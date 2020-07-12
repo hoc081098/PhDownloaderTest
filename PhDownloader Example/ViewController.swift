@@ -47,6 +47,18 @@ class ViewController: UIViewController {
     self.tableView.delegate = self
 
     self.downloader
+      .downloadResult$
+      .subscribe(onNext: { result in
+        switch result {
+        case .success(let request):
+          print("Success: \(request.identifier)")
+        case .failure(let error):
+          print("Failure: \(error)")
+        }
+      })
+      .disposed(by: self.disposeBag)
+
+    self.downloader
       .observeState(by: self.items.map { $0.request.identifier })
       .throttle(.milliseconds(500), latest: true, scheduler: MainScheduler.instance)
       .subscribe(onNext: { [weak self] states in
@@ -73,7 +85,7 @@ class ViewController: UIViewController {
       })
       .disposed(by: self.disposeBag)
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
       self.items.map { $0.request }.forEach { request in
         self.downloader
           .enqueue(request)
