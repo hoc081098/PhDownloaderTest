@@ -18,7 +18,7 @@ class ViewController: UIViewController {
 
   @IBOutlet weak var tableView: UITableView!
 
-  private let downloader: PhDownloader = try! PhDownloaderFactory.downloader(with: .init(
+  private let downloader: PhDownloader = try! PhDownloaderFactory.makeDownloader(with: .init(
     maxConcurrent: 2,
     throttleProgress: .milliseconds(500))
   )
@@ -42,6 +42,19 @@ class ViewController: UIViewController {
 
   override func viewDidLoad() {
     super.viewDidLoad()
+
+
+//    var b = false
+//    Observable.just(1).delay(.seconds(2), scheduler: MainScheduler.instance)
+//    .do(onCompleted: { b = true })
+//      .takeUntil(Observable<Int>.timer(.seconds(5), scheduler: MainScheduler.instance))
+//      .do(
+//        onCompleted: { print("onCompleted") },
+//        afterCompleted: { print("afterCompleted") },
+//        onDispose: { print("onDispose \(b)") }
+//      )
+//      .subscribe()
+//    return
 
     self.tableView.dataSource = self
     self.tableView.delegate = self
@@ -108,6 +121,7 @@ extension ViewController: UITableViewDataSource, UITableViewDelegate {
 
     cell.textLabel?.text = item.request.url.absoluteString
     cell.detailTextLabel?.text = "\(item.state)"
+    cell.detailTextLabel?.textColor = color(for: item.state)
 
     return cell
   }
@@ -121,3 +135,20 @@ extension ViewController: UITableViewDataSource, UITableViewDelegate {
   }
 }
 
+func color(for state: PhDownloadState) -> UIColor {
+  switch state {
+
+  case .undefined:
+    return .darkGray
+  case .enqueued:
+    return .orange
+  case .downloading:
+    return .green
+  case .completed:
+    return .blue
+  case .failed:
+    return .red
+  case .cancelled:
+    return .systemPink
+  }
+}

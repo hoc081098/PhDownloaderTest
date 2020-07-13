@@ -31,15 +31,18 @@ public protocol PhDownloader {
 }
 
 public enum PhDownloaderError: Error, CustomDebugStringConvertible {
-  case destroyed
+  case databaseError(Error)
   case downloadError(Error)
+  case notFound(identifier: String)
 
   public var debugDescription: String {
     switch self {
-    case .destroyed:
-      return "Downloader already destroyed. Please keep strong reference to it to prevent the deallocation"
     case .downloadError(let error):
-      return "Download failure: \(error)"
+      return "Download failure: \(error)."
+    case .databaseError(let error):
+      return "Database error: \(error)."
+    case .notFound(let identifier):
+      return "Not found task with identifier: \(identifier)."
     }
   }
 }
@@ -47,8 +50,8 @@ public enum PhDownloaderError: Error, CustomDebugStringConvertible {
 public typealias PhDownloadResult = Swift.Result<PhDownloadRequest, PhDownloaderError>
 
 public enum PhDownloaderFactory {
-  public static func downloader(with options: PhDownloaderOptions) throws -> PhDownloader {
-    let dataSource = PhDownloadRealLocalDataSource(realm: try realm())
+  public static func makeDownloader(with options: PhDownloaderOptions) throws -> PhDownloader {
+    let dataSource = PhDownloadRealLocalDataSource(realmInitializer: provideRealm)
     return RealSwiftyDownloader(
       options: options,
       dataSource: dataSource
@@ -59,21 +62,27 @@ public enum PhDownloaderFactory {
 // MARK: - PhDownloadLocalDataSource
 
 protocol PhDownloadLocalDataSource {
-  func update(id: String, state: PhDownloadState) throws
 
+  /// Update download state for download task
+  func update(id: String, state: PhDownloadState) -> Completable
+
+  /// Insert or update download task
   func insertOrUpdate(
     identifier: String,
     url: URL,
     fileName: String,
     savedDir: URL,
     state: PhDownloadState
-  ) throws
+  ) -> Completable
 
-  func getResults(by ids: Set<String>) -> Results<PhDownloadTaskEntity>
+  /// Get `Results` by multiple ids
+  func getResults(by ids: Set<String>) throws -> Results<PhDownloadTaskEntity>
 
-  func getResults(by id: String) -> Results<PhDownloadTaskEntity>
+  /// Get `Results` by single id
+  func getResults(by id: String) throws -> Results<PhDownloadTaskEntity>
 
-  func get(by id: String) -> PhDownloadTaskEntity?
+  /// Get single task by id
+  func get(by id: String) throws -> PhDownloadTaskEntity?
 }
 
 extension FileManager {
@@ -91,9 +100,8 @@ extension FileManager {
   }
 }
 
-func realm() throws -> Realm {
+func provideRealm() throws -> Realm {
   let fileURL = try FileManager.phDownloaderDirectory().appendingPathComponent("phdownloader_default.realm")
-  print(fileURL)
 
   let configuration = Realm.Configuration(
     fileURL: fileURL,
@@ -116,21 +124,69 @@ func realm() throws -> Realm {
   return try Realm(configuration: configuration)
 }
 
-class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
-  private let realm: Realm
+public protocol RealmAdapter {
+  func objects<Element: Object>(_ type: Element.Type) -> Results<Element>
 
-  init(realm: Realm) {
-    self.realm = realm
+  func write<Result>(
+    withoutNotifying tokens: [NotificationToken],
+    _ block: () throws -> Result
+  ) throws -> Result
+
+  func add(_ object: Object, update: Realm.UpdatePolicy)
+
+  func delete<Element: Object>(_ objects: Results<Element>)
+
+  func refresh() -> Bool
+
+  func object<Element: Object, KeyType>(ofType type: Element.Type, forPrimaryKey key: KeyType) -> Element?
+}
+
+extension Realm: RealmAdapter { }
+
+class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
+
+  /// Since we use `Realm` in background thread
+  private let realmInitializer: () throws -> RealmAdapter
+
+  /// DispatchQueue that is used to dispatch work items that updated realm `Object`
+  private let queue = DispatchQueue(label: "\(PhDownloadRealLocalDataSource.self)", qos: .userInitiated)
+
+  init(realmInitializer: @escaping () throws -> RealmAdapter) {
+    self.realmInitializer = realmInitializer
   }
 
-  func update(id: String, state: PhDownloadState) throws {
-    guard let task = self.find(by: id) else {
-      return
-    }
+  func update(id: String, state: PhDownloadState) -> Completable {
+      .create { obsever -> Disposable in
+        let disposable = BooleanDisposable()
 
-    try self.realm.write {
-      task.state = state.toInt
-      task.updatedAt = .init()
+        self.queue.async {
+          autoreleasepool {
+            do {
+              if disposable.isDisposed { return }
+
+              let realm = try self.realmInitializer()
+              _ = realm.refresh()
+
+              guard let task = Self.find(by: id, in: realm) else {
+                return
+              }
+
+              if disposable.isDisposed { return }
+
+              try realm.write(withoutNotifying: []) {
+                task.state = state.toInt
+                task.updatedAt = .init()
+              }
+
+              obsever(.completed)
+            } catch {
+              obsever(.error(error))
+            }
+          }
+        }
+
+
+        return disposable
     }
   }
 
@@ -140,39 +196,62 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
     fileName: String,
     savedDir: URL,
     state: PhDownloadState
-  ) throws {
-    try self.realm.write {
-      self.realm.add(
-        PhDownloadTaskEntity(
-          identifier: identifier,
-          url: url,
-          fileName: fileName,
-          savedDir: savedDir,
-          state: state.toInt
-        ),
-        update: .modified
-      )
+  ) -> Completable {
+      .create { observer -> Disposable in
+        let disposable = BooleanDisposable()
+
+        self.queue.async {
+          autoreleasepool {
+            do {
+              if disposable.isDisposed { return }
+
+              let realm = try self.realmInitializer()
+              _ = realm.refresh()
+
+              if disposable.isDisposed { return }
+
+              try realm.write(withoutNotifying: []) {
+                realm.add(
+                  PhDownloadTaskEntity(
+                    identifier: identifier,
+                    url: url,
+                    fileName: fileName,
+                    savedDir: savedDir,
+                    state: state.toInt
+                  ),
+                  update: .modified
+                )
+              }
+
+              observer(.completed)
+            } catch {
+              observer(.error(error))
+            }
+          }
+        }
+
+        return disposable
     }
   }
 
-  func getResults(by ids: Set<String>) -> Results<PhDownloadTaskEntity> {
-    self.realm
+  func getResults(by ids: Set<String>)throws -> Results<PhDownloadTaskEntity> {
+    try self.realmInitializer()
       .objects(PhDownloadTaskEntity.self)
       .filter("SELF.identifier IN %@", ids)
   }
 
-  func getResults(by id: String) -> Results<PhDownloadTaskEntity> {
-    self.realm
+  func getResults(by id: String)throws -> Results<PhDownloadTaskEntity> {
+    try self.realmInitializer()
       .objects(PhDownloadTaskEntity.self)
       .filter("SELF.identifier = %@", id)
   }
 
-  func get(by id: String) -> PhDownloadTaskEntity? {
-    self.find(by: id)
+  func get(by id: String) throws -> PhDownloadTaskEntity? {
+    Self.find(by: id, in: try self.realmInitializer())
   }
 
-  private func find(by id: String) -> PhDownloadTaskEntity? {
-    self.realm.object(ofType: PhDownloadTaskEntity.self, forPrimaryKey: id)
+  private static func find(by id: String, in realm: RealmAdapter) -> PhDownloadTaskEntity? {
+    realm.object(ofType: PhDownloadTaskEntity.self, forPrimaryKey: id)
   }
 }
 
@@ -259,14 +338,14 @@ extension RxProgress {
 }
 
 extension Event where Element == RxProgress {
-  var asDownloadState: PhDownloadState {
+  func asDownloadState(_ isCompleted: Bool) -> PhDownloadState {
     switch self {
     case .next(let progress):
       return progress.asDownloadState
     case .error:
       return .failed
     case .completed:
-      return .completed
+      return isCompleted ? .completed : .cancelled
     }
   }
 }
@@ -312,12 +391,13 @@ final class RealSwiftyDownloader: PhDownloader {
 
   // MARK: Private helpers
 
-  private func createDownloadRequest(_ request: PhDownloadRequest) -> Observable<Void>
-  {
-    Observable
+  private func createDownloadRequest(_ request: PhDownloadRequest) -> Observable<Void> {
+    var isCompleted = false
+
+    return Observable
       .deferred { [dataSource] () -> Observable<DownloadRequest> in
         // already cancelled before
-        if dataSource.get(by: request.identifier)?.state.toDownloadState == .cancelled {
+        if (try dataSource.get(by: request.identifier))?.state.toDownloadState == .cancelled {
           return .empty()
         }
 
@@ -330,20 +410,17 @@ final class RealSwiftyDownloader: PhDownloader {
         }
         return RxAlamofire.download(urlRequest, to: destination)
       }
+      .subscribeOn(Self.concurrentMainScheduler)
       .flatMap { $0.rx.progress() }
+      .observeOn(Self.mainScheduler)
+      .do(onCompleted: { isCompleted = true })
       .takeUntil(self.cancelCommand(for: request.identifier))
       .throttle(self.options.throttleProgress, latest: true, scheduler: self.throttleScheduler)
       .distinctUntilChanged()
       .materialize()
       .observeOn(Self.mainScheduler)
       .do(
-        onNext: { [downloadResultS, dataSource] notification in
-
-          try? dataSource.update(
-            id: request.identifier,
-            state: notification.asDownloadState
-          )
-
+        onNext: { [downloadResultS] notification in
           switch notification {
           case .error(let error):
             downloadResultS.accept(.failure(.downloadError(error)))
@@ -354,27 +431,58 @@ final class RealSwiftyDownloader: PhDownloader {
           }
         }
       )
+      .flatMap { [dataSource] notification -> Completable in
+        dataSource.update(
+          id: request.identifier,
+          state: notification.asDownloadState(isCompleted)
+        )
+      }
       .map { _ in () }
       .catchError { error in
-        print("downloadProgress error: \(error)")
+        print("Download error: \(error)")
         return .empty()
-    }
+      }
   }
 
-  private func cancelCommand(for identifierNeedCancel: String) -> Observable<String> {
+  private func cancelCommand(for identifierNeedCancel: String) -> Observable<Void> {
     self.commandS.compactMap {
-      if case .cancel(let identifier) = $0, identifier == identifierNeedCancel { return identifier }
+      if case .cancel(let identifier) = $0, identifier == identifierNeedCancel { return () }
       return nil
     }
   }
 
-  private func cancelDownload(_ identifier: String) {
-    DispatchQueue.main.async {
-      if let task = self.dataSource.get(by: identifier) {
-        let fileURL = URL(fileURLWithPath: task.savedDir).appendingPathComponent(task.fileName)
-        try? FileManager.default.removeItem(at: fileURL)
+  private func cancelDownload(_ identifier: String) -> Completable {
+    return .create { observer -> Disposable in
+      let disposable = BooleanDisposable()
+      let compositeDisposable = CompositeDisposable()
+      _ = compositeDisposable.insert(disposable)
+
+      DispatchQueue.main.async {
+        do {
+          if disposable.isDisposed { return }
+
+          guard let task = try self.dataSource.get(by: identifier) else {
+            return observer(.error(PhDownloaderError.notFound(identifier: identifier)))
+          }
+
+          if disposable.isDisposed { return }
+
+          let fileURL = URL(fileURLWithPath: task.savedDir).appendingPathComponent(task.fileName)
+          try? FileManager.default.removeItem(at: fileURL)
+
+          if disposable.isDisposed { return }
+
+          _ = compositeDisposable.insert(
+            self.dataSource
+              .update(id: identifier, state: .cancelled)
+              .subscribe(observer)
+          )
+        } catch {
+          observer(.error(PhDownloaderError.databaseError(error)))
+        }
       }
-      try? self.dataSource.update(id: identifier, state: .cancelled)
+
+      return compositeDisposable
     }
   }
 }
@@ -383,26 +491,27 @@ final class RealSwiftyDownloader: PhDownloader {
 extension RealSwiftyDownloader {
   func observeState(by identifier: String) -> Observable<PhDownloadState> {
     Observable
-      .deferred { [weak self] () -> Observable<PhDownloadState> in
-        guard let self = self else {
-          return .error(PhDownloaderError.destroyed)
-        }
+      .deferred { [dataSource] () -> Observable<PhDownloadState> in
+        do {
+          if let task = try dataSource.get(by: identifier) {
+            return Observable
+              .from(object: task, emitInitialValue: true)
+              .map { $0.state.toDownloadState }
+              .subscribeOn(Self.concurrentMainScheduler)
+          }
 
-        if let task = self.dataSource.get(by: identifier) {
           return Observable
-            .from(object: task, emitInitialValue: true)
-            .map { $0.state.toDownloadState }
+            .collection(
+              from: try dataSource.getResults(by: identifier),
+              synchronousStart: true,
+              on: .main
+            )
+            .map { results in results.first?.state.toDownloadState ?? .undefined }
             .subscribeOn(Self.concurrentMainScheduler)
-        }
 
-        return Observable
-          .collection(
-            from: self.dataSource.getResults(by: identifier),
-            synchronousStart: true,
-            on: .main
-          )
-          .map { results in results.first?.state.toDownloadState ?? .undefined }
-          .subscribeOn(Self.concurrentMainScheduler)
+        } catch {
+          return .error(PhDownloaderError.databaseError(error))
+        }
       }
       .distinctUntilChanged()
   }
@@ -412,18 +521,25 @@ extension RealSwiftyDownloader {
 // MARK: Observe state by identifiers
 extension RealSwiftyDownloader {
   func observeState<T: Sequence>(by identifiers: T) -> Observable<[String: PhDownloadState]> where T.Element == String {
-    Observable
-      .collection(
-        from: self.dataSource.getResults(by: Set(identifiers)),
-        synchronousStart: true,
-        on: .main
-      )
-      .map { results in
-        let tuples = Array(results).map { ($0.identifier, $0.state.toDownloadState) }
-        let stateById = Dictionary(uniqueKeysWithValues: tuples)
-        return Dictionary(uniqueKeysWithValues: identifiers.map { ($0, stateById[$0] ?? .undefined) })
-      }
-      .distinctUntilChanged()
+      .deferred { [dataSource] () -> Observable<[String : PhDownloadState]> in
+        do {
+          return Observable
+            .collection(
+              from: try dataSource.getResults(by: Set(identifiers)),
+              synchronousStart: true,
+              on: .main
+            )
+            .subscribeOn(Self.concurrentMainScheduler)
+            .map { results in
+              let tuples = Array(results).map { ($0.identifier, $0.state.toDownloadState) }
+              let stateById = Dictionary(uniqueKeysWithValues: tuples)
+              return Dictionary(uniqueKeysWithValues: identifiers.map { ($0, stateById[$0] ?? .undefined) })
+            }
+            .distinctUntilChanged()
+        } catch {
+          return .error(PhDownloaderError.databaseError(error))
+        }
+    }
   }
 }
 
@@ -435,50 +551,29 @@ extension RealSwiftyDownloader {
 // MARK: Enqueue download request
 extension RealSwiftyDownloader {
   func enqueue(_ request: PhDownloadRequest) -> Completable {
-    Completable
-      .deferred { [weak self] () -> Completable in
-        guard let self = self else {
-          return .error(PhDownloaderError.destroyed)
-        }
-
-        do {
-          try self.dataSource.insertOrUpdate(
-            identifier: request.identifier,
-            url: request.url,
-            fileName: request.fileName,
-            savedDir: request.savedDir,
-            state: .enqueued
-          )
-        } catch {
-          return .error(error)
-        }
-
-        self.commandS.accept(.enqueue(request: request))
-        return .empty()
-      }
-      .subscribeOn(Self.concurrentMainScheduler)
+    // insert or update task into database
+    // and then, send command to enqueue download request
+    self.dataSource
+      .insertOrUpdate(
+        identifier: request.identifier,
+        url: request.url,
+        fileName: request.fileName,
+        savedDir: request.savedDir,
+        state: .enqueued
+      )
+      .observeOn(Self.mainScheduler)
+      .do(onCompleted: { [commandS] in commandS.accept(.enqueue(request: request)) })
   }
 }
 
 // MARK: Cancel by identifier
 extension RealSwiftyDownloader {
   func cancel(by identifier: String) -> Completable {
-    Completable
-      .deferred { [weak self] () -> Completable in
-        guard let self = self else {
-          return .error(PhDownloaderError.destroyed)
-        }
-
-        // mask task as cancelled
-        // to prevent executing enqueued task
-        self.cancelDownload(identifier)
-
-        // send command to cancel downloading task
-        self.commandS.accept(.cancel(identifier: identifier))
-
-        return .empty()
-      }
-      .subscribeOn(Self.concurrentMainScheduler)
+    // mask task as cancelled to prevent executing enqueued task
+    // and then, send command to cancel downloading task
+    self.cancelDownload(identifier)
+      .observeOn(Self.mainScheduler)
+      .do(onCompleted: { [commandS] in commandS.accept(.cancel(identifier: identifier)) })
   }
 }
 
