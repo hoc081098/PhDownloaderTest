@@ -47,7 +47,11 @@ public enum PhDownloaderError: Error, CustomDebugStringConvertible {
   }
 }
 
-public typealias PhDownloadResult = Swift.Result<PhDownloadRequest, PhDownloaderError>
+public enum PhDownloadResult {
+  case success(PhDownloadRequest)
+  case cancelled(PhDownloadRequest)
+  case failure(PhDownloadRequest, PhDownloaderError)
+}
 
 public enum PhDownloaderFactory {
   public static func makeDownloader(with options: PhDownloaderOptions) throws -> PhDownloader {
@@ -383,7 +387,7 @@ final class RealSwiftyDownloader: PhDownloader {
         if case .enqueue(request: let request) = $0 { return request }
         return nil
       }
-      .map { [weak self] request in self?.createDownloadRequest(request) ?? .empty() }
+      .map { [weak self] request in self?.executeDownload(request) ?? .empty() }
       .merge(maxConcurrent: options.maxConcurrent)
       .subscribe()
       .disposed(by: self.disposeBag)
@@ -391,7 +395,7 @@ final class RealSwiftyDownloader: PhDownloader {
 
   // MARK: Private helpers
 
-  private func createDownloadRequest(_ request: PhDownloadRequest) -> Observable<Void> {
+  private func executeDownload(_ request: PhDownloadRequest) -> Observable<Void> {
     var isCompleted = false
 
     return Observable
@@ -419,29 +423,31 @@ final class RealSwiftyDownloader: PhDownloader {
       .distinctUntilChanged()
       .materialize()
       .observeOn(Self.mainScheduler)
+      .map { (state: $0.asDownloadState(isCompleted), error: $0.error) }
       .do(
-        onNext: { [downloadResultS] notification in
-          switch notification {
-          case .error(let error):
-            downloadResultS.accept(.failure(.downloadError(error)))
-          case .completed:
+        onNext: { [downloadResultS] (state, error) in
+          if case .completed = state {
             downloadResultS.accept(.success(request))
-          case .next:
-            ()
+          }
+          else if case .cancelled = state {
+            downloadResultS.accept(.cancelled(request))
+          }
+          else if case .failed = state, let error = error {
+            downloadResultS.accept(.failure(request, .downloadError(error)))
           }
         }
       )
-      .flatMap { [dataSource] notification -> Completable in
+      .flatMap { [dataSource] (state, _) -> Completable in
         dataSource.update(
           id: request.identifier,
-          state: notification.asDownloadState(isCompleted)
+          state: state
         )
       }
       .map { _ in () }
       .catchError { error in
-        print("Download error: \(error)")
+        print("Unhandle error: \(error)")
         return .empty()
-      }
+    }
   }
 
   private func cancelCommand(for identifierNeedCancel: String) -> Observable<Void> {
@@ -452,37 +458,37 @@ final class RealSwiftyDownloader: PhDownloader {
   }
 
   private func cancelDownload(_ identifier: String) -> Completable {
-    return .create { observer -> Disposable in
-      let disposable = BooleanDisposable()
-      let compositeDisposable = CompositeDisposable()
-      _ = compositeDisposable.insert(disposable)
+      .create { observer -> Disposable in
+        let disposable = BooleanDisposable()
+        let compositeDisposable = CompositeDisposable()
+        _ = compositeDisposable.insert(disposable)
 
-      DispatchQueue.main.async {
-        do {
-          if disposable.isDisposed { return }
+        DispatchQueue.main.async {
+          do {
+            if disposable.isDisposed { return }
 
-          guard let task = try self.dataSource.get(by: identifier) else {
-            return observer(.error(PhDownloaderError.notFound(identifier: identifier)))
+            guard let task = try self.dataSource.get(by: identifier) else {
+              return observer(.error(PhDownloaderError.notFound(identifier: identifier)))
+            }
+
+            if disposable.isDisposed { return }
+
+            let fileURL = URL(fileURLWithPath: task.savedDir).appendingPathComponent(task.fileName)
+            try? FileManager.default.removeItem(at: fileURL)
+
+            if disposable.isDisposed { return }
+
+            _ = compositeDisposable.insert(
+              self.dataSource
+                .update(id: identifier, state: .cancelled)
+                .subscribe(observer)
+            )
+          } catch {
+            observer(.error(PhDownloaderError.databaseError(error)))
           }
-
-          if disposable.isDisposed { return }
-
-          let fileURL = URL(fileURLWithPath: task.savedDir).appendingPathComponent(task.fileName)
-          try? FileManager.default.removeItem(at: fileURL)
-
-          if disposable.isDisposed { return }
-
-          _ = compositeDisposable.insert(
-            self.dataSource
-              .update(id: identifier, state: .cancelled)
-              .subscribe(observer)
-          )
-        } catch {
-          observer(.error(PhDownloaderError.databaseError(error)))
         }
-      }
 
-      return compositeDisposable
+        return compositeDisposable
     }
   }
 }

@@ -19,13 +19,13 @@ class ViewController: UIViewController {
   @IBOutlet weak var tableView: UITableView!
 
   private let downloader: PhDownloader = try! PhDownloaderFactory.makeDownloader(with: .init(
-    maxConcurrent: 2,
-    throttleProgress: .milliseconds(500))
+    maxConcurrent: 10,
+    throttleProgress: .milliseconds(200))
   )
 
   private let disposeBag = DisposeBag()
 
-  private var items: [Item] = (0..<10).map { i in
+  private var items: [Item] = (0..<100).map { i in
       .init(
         request: .init(
           identifier: String(i),
@@ -65,8 +65,10 @@ class ViewController: UIViewController {
         switch result {
         case .success(let request):
           print("Success: \(request.identifier)")
-        case .failure(let error):
-          print("Failure: \(error)")
+        case .failure(let request, let error):
+          print("Failure: \(request.identifier) - \(error)")
+        case .cancelled(let request):
+          print("Cancel: \(request.identifier)")
         }
       })
       .disposed(by: self.disposeBag)
