@@ -19,13 +19,13 @@ class ViewController: UIViewController {
   @IBOutlet weak var tableView: UITableView!
 
   private let downloader: PhDownloader = try! PhDownloaderFactory.makeDownloader(with: .init(
-    maxConcurrent: 10,
-    throttleProgress: .milliseconds(200))
+    maxConcurrent: 2,
+    throttleProgress: .milliseconds(500))
   )
 
   private let disposeBag = DisposeBag()
 
-  private var items: [Item] = (0..<100).map { i in
+  private lazy var items: [Item] = (0..<500).map { i in
       .init(
         request: .init(
           identifier: String(i),
@@ -42,19 +42,6 @@ class ViewController: UIViewController {
 
   override func viewDidLoad() {
     super.viewDidLoad()
-
-
-//    var b = false
-//    Observable.just(1).delay(.seconds(2), scheduler: MainScheduler.instance)
-//    .do(onCompleted: { b = true })
-//      .takeUntil(Observable<Int>.timer(.seconds(5), scheduler: MainScheduler.instance))
-//      .do(
-//        onCompleted: { print("onCompleted") },
-//        afterCompleted: { print("afterCompleted") },
-//        onDispose: { print("onDispose \(b)") }
-//      )
-//      .subscribe()
-//    return
 
     self.tableView.dataSource = self
     self.tableView.delegate = self
@@ -101,13 +88,11 @@ class ViewController: UIViewController {
       .disposed(by: self.disposeBag)
 
     DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-      self.items.map { $0.request }.forEach { request in
-        self.downloader
-          .enqueue(request)
-          .subscribe()
-          .disposed(by: self.disposeBag)
-
-      }
+      self.items
+        .map { self.downloader.enqueue($0.request) }
+        .reduce(Completable.empty()) { $0.andThen($1) }
+        .subscribe()
+        .disposed(by: self.disposeBag)
     }
   }
 }

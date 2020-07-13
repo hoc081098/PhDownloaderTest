@@ -55,7 +55,14 @@ public enum PhDownloadResult {
 
 public enum PhDownloaderFactory {
   public static func makeDownloader(with options: PhDownloaderOptions) throws -> PhDownloader {
-    let dataSource = PhDownloadRealLocalDataSource(realmInitializer: provideRealm)
+    let queue = OperationQueue()
+    queue.maxConcurrentOperationCount = options.maxConcurrent * 2
+
+    let dataSource = PhDownloadRealLocalDataSource(
+      realmInitializer: provideRealm,
+      queue: queue
+    )
+
     return RealSwiftyDownloader(
       options: options,
       dataSource: dataSource
@@ -152,27 +159,29 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
   /// Since we use `Realm` in background thread
   private let realmInitializer: () throws -> RealmAdapter
 
-  /// DispatchQueue that is used to dispatch work items that updated realm `Object`
-  private let queue = DispatchQueue(label: "\(PhDownloadRealLocalDataSource.self)", qos: .userInitiated)
+  /// OperationQueue that is used to dispatch blocks that updated realm `Object`
+  private let queue: OperationQueue
 
-  init(realmInitializer: @escaping () throws -> RealmAdapter) {
+  init(realmInitializer: @escaping () throws -> RealmAdapter, queue: OperationQueue) {
     self.realmInitializer = realmInitializer
+    self.queue = queue
   }
 
   func update(id: String, state: PhDownloadState) -> Completable {
-      .create { obsever -> Disposable in
+      .create { [queue, realmInitializer] obsever -> Disposable in
         let disposable = BooleanDisposable()
 
-        self.queue.async {
+        queue.addOperation {
           autoreleasepool {
             do {
               if disposable.isDisposed { return }
 
-              let realm = try self.realmInitializer()
+              let realm = try realmInitializer()
               _ = realm.refresh()
 
               guard let task = Self.find(by: id, in: realm) else {
-                return
+                let error = PhDownloaderError.notFound(identifier: id)
+                return obsever(.error(error))
               }
 
               if disposable.isDisposed { return }
@@ -189,7 +198,6 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
           }
         }
 
-
         return disposable
     }
   }
@@ -201,15 +209,15 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
     savedDir: URL,
     state: PhDownloadState
   ) -> Completable {
-      .create { observer -> Disposable in
+      .create { [queue, realmInitializer] observer -> Disposable in
         let disposable = BooleanDisposable()
 
-        self.queue.async {
+        queue.addOperation {
           autoreleasepool {
             do {
               if disposable.isDisposed { return }
 
-              let realm = try self.realmInitializer()
+              let realm = try realmInitializer()
               _ = realm.refresh()
 
               if disposable.isDisposed { return }
@@ -221,7 +229,8 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
                     url: url,
                     fileName: fileName,
                     savedDir: savedDir,
-                    state: state.toInt
+                    state: state.toInt,
+                    updatedAt: .init()
                   ),
                   update: .modified
                 )
@@ -282,7 +291,8 @@ class PhDownloadTaskEntity: Object {
     url: URL,
     fileName: String,
     savedDir: URL,
-    state: Int
+    state: Int,
+    updatedAt: Date
   ) {
     self.init()
     self.identifier = identifier
@@ -290,6 +300,7 @@ class PhDownloadTaskEntity: Object {
     self.fileName = fileName
     self.savedDir = savedDir.path
     self.state = state
+    self.updatedAt = updatedAt
   }
 }
 
