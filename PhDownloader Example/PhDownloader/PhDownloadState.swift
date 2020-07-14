@@ -8,12 +8,12 @@
 
 import Foundation
 
-public enum PhDownloadState: CustomStringConvertible, Hashable {
+public enum PhDownloadState: CustomDebugStringConvertible, Hashable {
   case undefined
 
   case enqueued
 
-  case downloading(progress: Int)
+  case downloading(bytesWritten: Int64, totalBytes: Int64, percentage: Int)
 
   case completed
 
@@ -21,14 +21,14 @@ public enum PhDownloadState: CustomStringConvertible, Hashable {
 
   case cancelled
 
-  public var description: String {
+  public var debugDescription: String {
     switch self {
     case .undefined:
       return "undefined"
     case .enqueued:
       return "enqueue"
-    case .downloading(let progress):
-      return "downloading(\(progress)%)"
+    case .downloading(let bytesWritten, let totalBytes, let percentage):
+      return "downloading: \(percentage)% bytesWritten=\(bytesWritten), totalBytes=\(totalBytes)"
     case .completed:
       return "completed"
     case .failed:

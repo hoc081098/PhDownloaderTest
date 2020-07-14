@@ -209,7 +209,7 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
               if disposable.isDisposed { return }
 
               try realm.write(withoutNotifying: []) {
-                task.state = state.toInt
+                task.update(to: state)
                 task.updatedAt = .init()
               }
 
@@ -251,7 +251,7 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
                     url: url,
                     fileName: fileName,
                     savedDir: savedDir,
-                    state: state.toInt,
+                    state: state,
                     updatedAt: .init()
                   ),
                   update: .modified
@@ -295,25 +295,46 @@ class PhDownloadTaskEntity: Object {
   @objc dynamic var url: String = ""
   @objc dynamic var fileName: String = ""
   @objc dynamic var savedDir: String = ""
-  @objc dynamic var state: Int = undefined
   @objc dynamic var updatedAt: Date = .init()
+
+  @objc private dynamic var state: RawState = .undefined
+  private dynamic var bytesWritten = RealmOptional<Int64>()
+  private dynamic var totalBytes = RealmOptional<Int64>()
 
   override class func primaryKey() -> String? { "identifier" }
 
-  // MARK: Integer constants as download state
+  @objc enum RawState: Int, RealmEnum {
+    case undefined
+    case enqueued
+    case downloading
+    case completed
+    case failed
+    case cancelled
 
-  static let undefined = -2
-  static let enqueued = -1
-  static let completed = 101
-  static let failed = 102
-  static let cancelled = 103
+    init(from phDownloadState: PhDownloadState) {
+      switch phDownloadState {
+      case .undefined:
+        self = .undefined
+      case .enqueued:
+        self = .enqueued
+      case .downloading:
+        self = .downloading
+      case .completed:
+        self = .completed
+      case .failed:
+        self = .failed
+      case .cancelled:
+        self = .cancelled
+      }
+    }
+  }
 
   convenience init(
     identifier: String,
     url: URL,
     fileName: String,
     savedDir: URL,
-    state: Int,
+    state: PhDownloadState,
     updatedAt: Date
   ) {
     self.init()
@@ -321,64 +342,65 @@ class PhDownloadTaskEntity: Object {
     self.url = url.absoluteString
     self.fileName = fileName
     self.savedDir = savedDir.path
-    self.state = state
     self.updatedAt = updatedAt
+    self.update(to: state)
   }
-}
 
-extension PhDownloadState {
-  var toInt: Int {
-    switch self {
+  /// Must be in transaction
+  func update(to state: PhDownloadState) {
+    self.state = .init(from: state)
+    if case .downloading(let bytesWritten, let totalBytes, _) = state {
+      self.bytesWritten.value = bytesWritten
+      self.totalBytes.value = totalBytes
+    }
+  }
+
+  var phDownloadState: PhDownloadState {
+    switch state {
     case .undefined:
-      return PhDownloadTaskEntity.undefined
-    case .enqueued:
-      return PhDownloadTaskEntity.enqueued
-    case .downloading(let progress):
-      return progress
-    case .completed:
-      return PhDownloadTaskEntity.completed
-    case .failed:
-      return PhDownloadTaskEntity.failed
-    case .cancelled:
-      return PhDownloadTaskEntity.cancelled
-    }
-  }
-}
-
-extension Int {
-  var toDownloadState: PhDownloadState {
-    switch self {
-    case PhDownloadTaskEntity.undefined:
       return .undefined
-    case PhDownloadTaskEntity.enqueued:
+    case .enqueued:
       return .enqueued
-    case 0...100:
-      return .downloading(progress: self)
-    case PhDownloadTaskEntity.completed:
+    case .downloading:
+      let bytesWritten = self.bytesWritten.value!
+      let totalBytes = self.totalBytes.value!
+
+      return .downloading(
+        bytesWritten: bytesWritten,
+        totalBytes: totalBytes,
+        percentage: percentage(bytesWritten: bytesWritten, totalBytes: totalBytes)
+      )
+    case .completed:
       return .completed
-    case PhDownloadTaskEntity.failed:
-      return .failed
-    case PhDownloadTaskEntity.cancelled:
+    case .failed:
+      return .completed
+    case .cancelled:
       return .cancelled
-    default:
-      fatalError("Invalid state: \(self)")
     }
   }
 }
 
-extension RxProgress {
-  var asDownloadState: PhDownloadState {
-    if self.totalBytes <= 0 { return .downloading(progress: 0) }
-    let percent = Double(self.bytesWritten) / Double(self.totalBytes)
-    return .downloading(progress: Int(100 * percent))
-  }
+func percentage(bytesWritten: Int64, totalBytes: Int64) -> Int {
+  guard totalBytes > 0 else { return 0 }
+  let percent = Double(bytesWritten) / Double(totalBytes)
+  return Int(100 * percent)
 }
 
 extension Event where Element == RxProgress {
   func asDownloadState(_ isCompleted: Bool) -> PhDownloadState {
     switch self {
     case .next(let progress):
-      return progress.asDownloadState
+      let bytesWritten = progress.bytesWritten
+      let totalBytes = progress.totalBytes
+
+      return .downloading(
+        bytesWritten: bytesWritten,
+        totalBytes: totalBytes,
+        percentage: percentage(
+          bytesWritten: bytesWritten,
+          totalBytes: totalBytes
+        )
+      )
     case .error:
       return .failed
     case .completed:
@@ -438,7 +460,7 @@ final class RealSwiftyDownloader: PhDownloader {
     return Observable
       .deferred { [dataSource] () -> Observable<DownloadRequest> in
         // already cancelled before
-        if (try dataSource.get(by: request.identifier))?.state.toDownloadState == .cancelled {
+        if (try dataSource.get(by: request.identifier))?.phDownloadState == .cancelled {
           return .empty()
         }
 
@@ -511,7 +533,7 @@ final class RealSwiftyDownloader: PhDownloader {
               return observer(.error(PhDownloaderError.notFound(identifier: identifier)))
             }
 
-            guard !Set<PhDownloadState>([.completed, .failed]).contains(task.state.toDownloadState) else {
+            guard !Set<PhDownloadState>([.completed, .failed]).contains(task.phDownloadState) else {
               return observer(.error(PhDownloaderError.taskAlreadyTerminated(identifier: identifier)))
             }
 
@@ -541,7 +563,7 @@ extension RealSwiftyDownloader {
           if let task = try dataSource.get(by: identifier) {
             return Observable
               .from(object: task, emitInitialValue: true)
-              .map { $0.state.toDownloadState }
+              .map { $0.phDownloadState }
               .subscribeOn(Self.concurrentMainScheduler)
           }
 
@@ -551,7 +573,7 @@ extension RealSwiftyDownloader {
               synchronousStart: true,
               on: .main
             )
-            .map { results in results.first?.state.toDownloadState ?? .undefined }
+            .map { results in results.first?.phDownloadState ?? .undefined }
             .subscribeOn(Self.concurrentMainScheduler)
 
         } catch {
@@ -576,7 +598,7 @@ extension RealSwiftyDownloader {
             )
             .subscribeOn(Self.concurrentMainScheduler)
             .map { results in
-              let tuples = Array(results).map { ($0.identifier, $0.state.toDownloadState) }
+              let tuples = Array(results).map { ($0.identifier, $0.phDownloadState) }
               let stateById = Dictionary(uniqueKeysWithValues: tuples)
               return Dictionary(uniqueKeysWithValues: identifiers.map { ($0, stateById[$0] ?? .undefined) })
             }
