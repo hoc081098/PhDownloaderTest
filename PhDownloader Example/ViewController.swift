@@ -51,11 +51,11 @@ class ViewController: UIViewController {
       .subscribe(onNext: { result in
         switch result {
         case .success(let request):
-          print("Success: \(request.identifier)")
+          print("[Result] Success: id=\(request.identifier)")
         case .failure(let request, let error):
-          print("Failure: \(request.identifier) - \(error)")
+          print("[Result] Failure: id=\(request.identifier), error=\(error)")
         case .cancelled(let request):
-          print("Cancel: \(request.identifier)")
+          print("[Result] Cancelled: id=\(request.identifier)")
         }
       })
       .disposed(by: self.disposeBag)
@@ -115,9 +115,14 @@ extension ViewController: UITableViewDataSource, UITableViewDelegate {
 
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
+
+    let id = self.items[indexPath.row].request.identifier
     self.downloader
-      .cancel(by: self.items[indexPath.row].request.identifier)
-      .subscribe()
+      .cancel(by: id)
+      .subscribe(
+        onCompleted: { print("[Cancel] Success: id=\(id)") },
+        onError: { print("[Cancel] Failure: id=\(id), error=\($0)") }
+      )
       .disposed(by: self.disposeBag)
   }
 }

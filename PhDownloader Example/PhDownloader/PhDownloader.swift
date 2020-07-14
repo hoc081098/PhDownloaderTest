@@ -21,19 +21,34 @@ public protocol PhDownloader {
 
   func observeState<T: Sequence>(by identifiers: T) -> Observable<[String: PhDownloadState]> where T.Element == String
 
+  /// Download result event observable
+  /// # Reference:
+  /// [PhDownloadResult](x-source-tag://PhDownloadResult)
   var downloadResult$: Observable<PhDownloadResult> { get }
 
+  /// Enqueue a download request
   func enqueue(_ request: PhDownloadRequest) -> Completable
 
+  /// Cancel enqueued and running download task by identifier
   func cancel(by identifier: String) -> Completable
 
+  /// Cancel all enqueued and running download tasks
   func cancelAll() -> Completable
 }
 
+/// It represents downloader errors
 public enum PhDownloaderError: Error, CustomDebugStringConvertible {
+  /// Realm error
   case databaseError(Error)
+
+  /// Download error: No internet connection, file writing error, ...
   case downloadError(Error)
+
+  /// Not found download task by identifier.
   case notFound(identifier: String)
+
+  /// Task is not running (completed or failed). So it is can't be cancelled.
+  case taskAlreadyTerminated(identifier: String)
 
   public var debugDescription: String {
     switch self {
@@ -43,17 +58,24 @@ public enum PhDownloaderError: Error, CustomDebugStringConvertible {
       return "Database error: \(error)."
     case .notFound(let identifier):
       return "Not found task with identifier: \(identifier)."
+    case .taskAlreadyTerminated(let identifier):
+      return "Task with identifier: \(identifier) already terminated"
     }
   }
 }
 
+/// It represents downloader result in three cases: `success`, `cancelled`, `failure`
+/// - Tag: PhDownloadResult
 public enum PhDownloadResult {
   case success(PhDownloadRequest)
   case cancelled(PhDownloadRequest)
   case failure(PhDownloadRequest, PhDownloaderError)
 }
 
+/// Provide `PhDownloader` from `PhDownloaderOptions`
 public enum PhDownloaderFactory {
+
+  /// Provide `PhDownloader` from `PhDownloaderOptions`
   public static func makeDownloader(with options: PhDownloaderOptions) throws -> PhDownloader {
     let queue = OperationQueue()
     queue.maxConcurrentOperationCount = options.maxConcurrent * 2
@@ -406,6 +428,10 @@ final class RealSwiftyDownloader: PhDownloader {
 
   // MARK: Private helpers
 
+  /// Execute download request, update local database and send result.
+  /// All errors is sent to `downloadResultS` and  is discarded afterwards.
+  /// - Parameter request: Download request
+  /// - Returns: an observable that emits `Void`
   private func executeDownload(_ request: PhDownloadRequest) -> Observable<Void> {
     var isCompleted = false
 
@@ -448,7 +474,7 @@ final class RealSwiftyDownloader: PhDownloader {
           }
         }
       )
-      .flatMap { [dataSource] (state, _) -> Completable in
+      .concatMap { [dataSource] (state, _) -> Completable in
         dataSource.update(
           id: request.identifier,
           state: state
@@ -456,11 +482,13 @@ final class RealSwiftyDownloader: PhDownloader {
       }
       .map { _ in () }
       .catchError { error in
-        print("Unhandle error: \(error)")
+        print("[PhDownloader] Unhandle error: \(error)")
         return .empty()
-    }
+      }
+      .asObservable() // pretty format :)
   }
 
+  /// Filter command cancel task that has id equals to `identifierNeedCancel`
   private func cancelCommand(for identifierNeedCancel: String) -> Observable<Void> {
     self.commandS.compactMap {
       if case .cancel(let identifier) = $0, identifier == identifierNeedCancel { return () }
@@ -468,6 +496,9 @@ final class RealSwiftyDownloader: PhDownloader {
     }
   }
 
+  /// Sequential execute:
+  /// * Update file system: remove dowloaded file.
+  /// * Update local database: Update task state to cancelled
   private func cancelDownload(_ identifier: String) -> Completable {
       .create { observer -> Disposable in
         let disposable = BooleanDisposable()
@@ -480,6 +511,10 @@ final class RealSwiftyDownloader: PhDownloader {
 
             guard let task = try self.dataSource.get(by: identifier) else {
               return observer(.error(PhDownloaderError.notFound(identifier: identifier)))
+            }
+
+            guard !Set<PhDownloadState>([.completed, .failed]).contains(task.state.toDownloadState) else {
+              return observer(.error(PhDownloaderError.taskAlreadyTerminated(identifier: identifier)))
             }
 
             if disposable.isDisposed { return }
