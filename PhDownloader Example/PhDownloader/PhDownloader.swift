@@ -496,9 +496,7 @@ final class RealSwiftyDownloader: PhDownloader {
     }
   }
 
-  /// Sequential execute:
-  /// * Update file system: remove dowloaded file.
-  /// * Update local database: Update task state to cancelled
+  /// Update local database: Update state of task to cancelled
   private func cancelDownload(_ identifier: String) -> Completable {
       .create { observer -> Disposable in
         let disposable = BooleanDisposable()
@@ -516,11 +514,6 @@ final class RealSwiftyDownloader: PhDownloader {
             guard !Set<PhDownloadState>([.completed, .failed]).contains(task.state.toDownloadState) else {
               return observer(.error(PhDownloaderError.taskAlreadyTerminated(identifier: identifier)))
             }
-
-            if disposable.isDisposed { return }
-
-            let fileURL = URL(fileURLWithPath: task.savedDir).appendingPathComponent(task.fileName)
-            try? FileManager.default.removeItem(at: fileURL)
 
             if disposable.isDisposed { return }
 
