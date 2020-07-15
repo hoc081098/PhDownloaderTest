@@ -92,7 +92,7 @@ public enum PhDownloaderFactory {
   }
 }
 
-// MARK: - PhDownloadLocalDataSource
+// MARK: - LocalDataSource
 
 protocol LocalDataSource {
 
@@ -380,6 +380,8 @@ final class DownloadTaskEntity: Object {
   }
 }
 
+// MARK: - Utils
+
 func percentage(bytesWritten: Int64, totalBytes: Int64) -> Int {
   guard totalBytes > 0 else { return 0 }
   let percent = Double(bytesWritten) / Double(totalBytes)
@@ -415,7 +417,7 @@ enum Command {
   case cancel(identifier: String)
 }
 
-// MARK: - RealSwiftyDownloader
+// MARK: - RealDownloader
 
 final class RealDownloader: PhDownloader {
   // MARK: Dependencies
