@@ -80,12 +80,12 @@ public enum PhDownloaderFactory {
     let queue = OperationQueue()
     queue.maxConcurrentOperationCount = options.maxConcurrent * 2
 
-    let dataSource = PhDownloadRealLocalDataSource(
+    let dataSource = RealLocalDataSource(
       realmInitializer: provideRealm,
       queue: queue
     )
 
-    return RealSwiftyDownloader(
+    return RealDownloader(
       options: options,
       dataSource: dataSource
     )
@@ -94,7 +94,7 @@ public enum PhDownloaderFactory {
 
 // MARK: - PhDownloadLocalDataSource
 
-protocol PhDownloadLocalDataSource {
+protocol LocalDataSource {
 
   /// Update download state for download task
   func update(id: String, state: PhDownloadState) -> Completable
@@ -109,13 +109,13 @@ protocol PhDownloadLocalDataSource {
   ) -> Completable
 
   /// Get `Results` by multiple ids
-  func getResults(by ids: Set<String>) throws -> Results<PhDownloadTaskEntity>
+  func getResults(by ids: Set<String>) throws -> Results<DownloadTaskEntity>
 
   /// Get `Results` by single id
-  func getResults(by id: String) throws -> Results<PhDownloadTaskEntity>
+  func getResults(by id: String) throws -> Results<DownloadTaskEntity>
 
   /// Get single task by id
-  func get(by id: String) throws -> PhDownloadTaskEntity?
+  func get(by id: String) throws -> DownloadTaskEntity?
 }
 
 extension FileManager {
@@ -176,7 +176,7 @@ public protocol RealmAdapter {
 
 extension Realm: RealmAdapter { }
 
-class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
+final class RealLocalDataSource: LocalDataSource {
 
   /// Since we use `Realm` in background thread
   private let realmInitializer: () throws -> RealmAdapter
@@ -246,7 +246,7 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
 
               try realm.write(withoutNotifying: []) {
                 realm.add(
-                  PhDownloadTaskEntity(
+                  DownloadTaskEntity(
                     identifier: identifier,
                     url: url,
                     fileName: fileName,
@@ -269,28 +269,28 @@ class PhDownloadRealLocalDataSource: PhDownloadLocalDataSource {
     }
   }
 
-  func getResults(by ids: Set<String>)throws -> Results<PhDownloadTaskEntity> {
+  func getResults(by ids: Set<String>) throws -> Results<DownloadTaskEntity> {
     try self.realmInitializer()
-      .objects(PhDownloadTaskEntity.self)
+      .objects(DownloadTaskEntity.self)
       .filter("SELF.identifier IN %@", ids)
   }
 
-  func getResults(by id: String)throws -> Results<PhDownloadTaskEntity> {
+  func getResults(by id: String) throws -> Results<DownloadTaskEntity> {
     try self.realmInitializer()
-      .objects(PhDownloadTaskEntity.self)
+      .objects(DownloadTaskEntity.self)
       .filter("SELF.identifier = %@", id)
   }
 
-  func get(by id: String) throws -> PhDownloadTaskEntity? {
+  func get(by id: String) throws -> DownloadTaskEntity? {
     Self.find(by: id, in: try self.realmInitializer())
   }
 
-  private static func find(by id: String, in realm: RealmAdapter) -> PhDownloadTaskEntity? {
-    realm.object(ofType: PhDownloadTaskEntity.self, forPrimaryKey: id)
+  private static func find(by id: String, in realm: RealmAdapter) -> DownloadTaskEntity? {
+    realm.object(ofType: DownloadTaskEntity.self, forPrimaryKey: id)
   }
 }
 
-class PhDownloadTaskEntity: Object {
+final class DownloadTaskEntity: Object {
   @objc dynamic var identifier: String = ""
   @objc dynamic var url: String = ""
   @objc dynamic var fileName: String = ""
@@ -417,10 +417,10 @@ enum Command {
 
 // MARK: - RealSwiftyDownloader
 
-final class RealSwiftyDownloader: PhDownloader {
+final class RealDownloader: PhDownloader {
   // MARK: Dependencies
   private let options: PhDownloaderOptions
-  private let dataSource: PhDownloadLocalDataSource
+  private let dataSource: LocalDataSource
 
   // MARK: ReactiveX
   private let commandS = PublishRelay<Command>()
@@ -432,7 +432,7 @@ final class RealSwiftyDownloader: PhDownloader {
   private static var mainScheduler: MainScheduler { .instance }
   private static var concurrentMainScheduler: ConcurrentMainScheduler { .instance }
 
-  internal init(options: PhDownloaderOptions, dataSource: PhDownloadLocalDataSource) {
+  internal init(options: PhDownloaderOptions, dataSource: LocalDataSource) {
     self.options = options
     self.dataSource = dataSource
 
@@ -453,8 +453,8 @@ final class RealSwiftyDownloader: PhDownloader {
   /// Execute download request, update local database and send result.
   /// All errors is sent to `downloadResultS` and  is discarded afterwards.
   /// - Parameter request: Download request
-  /// - Returns: an observable that emits `Void`
-  private func executeDownload(_ request: PhDownloadRequest) -> Observable<Void> {
+  /// - Returns: a Completable that always completed
+  private func executeDownload(_ request: PhDownloadRequest) -> Completable {
     var isCompleted = false
 
     return Observable
@@ -502,18 +502,19 @@ final class RealSwiftyDownloader: PhDownloader {
           state: state
         )
       }
-      .map { _ in () }
       .catchError { error in
         print("[PhDownloader] Unhandle error: \(error)")
         return .empty()
       }
-      .asObservable() // pretty format :)
+      .asCompletable()
   }
 
   /// Filter command cancel task that has id equals to `identifierNeedCancel`
   private func cancelCommand(for identifierNeedCancel: String) -> Observable<Void> {
     self.commandS.compactMap {
-      if case .cancel(let identifier) = $0, identifier == identifierNeedCancel { return () }
+      if case .cancel(let identifier) = $0, identifier == identifierNeedCancel {
+        return ()
+      }
       return nil
     }
   }
@@ -555,7 +556,7 @@ final class RealSwiftyDownloader: PhDownloader {
 }
 
 // MARK: Observe state by identifier
-extension RealSwiftyDownloader {
+extension RealDownloader {
   func observeState(by identifier: String) -> Observable<PhDownloadState> {
     Observable
       .deferred { [dataSource] () -> Observable<PhDownloadState> in
@@ -586,9 +587,9 @@ extension RealSwiftyDownloader {
 }
 
 // MARK: Observe state by identifiers
-extension RealSwiftyDownloader {
+extension RealDownloader {
   func observeState<T: Sequence>(by identifiers: T) -> Observable<[String: PhDownloadState]> where T.Element == String {
-      .deferred { [dataSource] () -> Observable<[String : PhDownloadState]> in
+      .deferred { [dataSource] () -> Observable<[String: PhDownloadState]> in
         do {
           return Observable
             .collection(
@@ -611,12 +612,12 @@ extension RealSwiftyDownloader {
 }
 
 // MARK: Download result observable
-extension RealSwiftyDownloader {
+extension RealDownloader {
   var downloadResult$: Observable<PhDownloadResult> { self.downloadResultS.asObservable() }
 }
 
 // MARK: Enqueue download request
-extension RealSwiftyDownloader {
+extension RealDownloader {
   func enqueue(_ request: PhDownloadRequest) -> Completable {
     // insert or update task into database
     // and then, send command to enqueue download request
@@ -634,7 +635,7 @@ extension RealSwiftyDownloader {
 }
 
 // MARK: Cancel by identifier
-extension RealSwiftyDownloader {
+extension RealDownloader {
   func cancel(by identifier: String) -> Completable {
     // mask task as cancelled to prevent executing enqueued task
     // and then, send command to cancel downloading task
@@ -645,7 +646,7 @@ extension RealSwiftyDownloader {
 }
 
 // MARK: Cancel all
-extension RealSwiftyDownloader {
+extension RealDownloader {
   func cancelAll() -> Completable {
     fatalError()
   }

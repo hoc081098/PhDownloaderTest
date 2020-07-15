@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/PhDownloader Example.iml" filepath="$PROJECT_DIR$/.idea/PhDownloader Example.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/PhDownloader Example1.iml" filepath="$PROJECT_DIR$/.idea/PhDownloader Example1.iml" />
     </modules>
   </component>
 </project>
