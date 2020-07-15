@@ -61,14 +61,14 @@ class ViewController: UIViewController {
       .disposed(by: self.disposeBag)
 
     self.downloader
-      .observeState(by: self.items.map { $0.request.identifier })
+      .observe(by: self.items.map { $0.request.identifier })
       .throttle(.milliseconds(500), latest: true, scheduler: MainScheduler.instance)
-      .subscribe(onNext: { [weak self] states in
+      .subscribe(onNext: { [weak self] tasks in
         guard let self = self else { return }
 
         let newItems: [Item] = self.items.map { item in
           var copy = item
-          copy.state = states[item.request.identifier] ?? .undefined
+          copy.state = tasks[item.request.identifier]?.state ?? .undefined
           return copy
         }
 

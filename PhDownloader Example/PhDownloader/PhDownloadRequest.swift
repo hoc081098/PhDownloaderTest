@@ -8,7 +8,7 @@
 
 import Foundation
 
-public struct PhDownloadRequest {
+public struct PhDownloadRequest: Hashable {
 
   /// The unique identifier of download request
   public let identifier: String

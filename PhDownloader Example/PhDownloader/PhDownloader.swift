@@ -17,9 +17,15 @@ import Alamofire
 // MARK: - PhDownloader
 
 public protocol PhDownloader {
-  func observeState(by identifier: String) -> Observable<PhDownloadState>
+  /// Observe state of download task by id
+  /// - Parameter identifier: request id
+  /// - Returns: an `Observable` that emits nil if task does not exist, otherwise it will emit the download task.
+  func observe(by identifier: String) -> Observable<PhDownloadTask?>
 
-  func observeState<T: Sequence>(by identifiers: T) -> Observable<[String: PhDownloadState]> where T.Element == String
+  /// Observe state of download tasks by multiple ids
+  /// - Parameter identifiers: request ids
+  /// - Returns: an `Observable` that emits a dictionary with id as key, download task as value
+  func observe<T: Sequence>(by identifiers: T) -> Observable<[String: PhDownloadTask]> where T.Element == String
 
   /// Download result event observable
   /// # Reference:
@@ -329,6 +335,7 @@ final class DownloadTaskEntity: Object {
     }
   }
 
+  /// Must be in transaction
   convenience init(
     identifier: String,
     url: URL,
@@ -408,6 +415,20 @@ extension Event where Element == RxProgress {
     case .completed:
       return isCompleted ? .completed : .cancelled
     }
+  }
+}
+
+extension PhDownloadTask {
+  init(from entity: DownloadTaskEntity) {
+    self.init(
+      request: .init(
+        identifier: entity.identifier,
+        url: URL(string: entity.url)!,
+        fileName: entity.fileName,
+        savedDir: URL(fileURLWithPath: entity.savedDir)
+      ),
+      state: entity.phDownloadState
+    )
   }
 }
 
@@ -559,14 +580,14 @@ final class RealDownloader: PhDownloader {
 
 // MARK: Observe state by identifier
 extension RealDownloader {
-  func observeState(by identifier: String) -> Observable<PhDownloadState> {
+  func observe(by identifier: String) -> Observable<PhDownloadTask?> {
     Observable
-      .deferred { [dataSource] () -> Observable<PhDownloadState> in
+      .deferred { [dataSource] () -> Observable<PhDownloadTask?> in
         do {
           if let task = try dataSource.get(by: identifier) {
             return Observable
               .from(object: task, emitInitialValue: true)
-              .map { $0.phDownloadState }
+              .map { .init(from: $0) }
               .subscribeOn(Self.concurrentMainScheduler)
           }
 
@@ -576,7 +597,7 @@ extension RealDownloader {
               synchronousStart: true,
               on: .main
             )
-            .map { results in results.first?.phDownloadState ?? .undefined }
+            .map { results in results.first.map { .init(from: $0) } }
             .subscribeOn(Self.concurrentMainScheduler)
 
         } catch {
@@ -590,8 +611,10 @@ extension RealDownloader {
 
 // MARK: Observe state by identifiers
 extension RealDownloader {
-  func observeState<T: Sequence>(by identifiers: T) -> Observable<[String: PhDownloadState]> where T.Element == String {
-      .deferred { [dataSource] () -> Observable<[String: PhDownloadState]> in
+  func observe<T: Sequence>(by identifiers: T) -> Observable<[String: PhDownloadTask]>
+  where T.Element == String
+  {
+      .deferred { [dataSource] () -> Observable<[String: PhDownloadTask]> in
         do {
           return Observable
             .collection(
@@ -601,9 +624,8 @@ extension RealDownloader {
             )
             .subscribeOn(Self.concurrentMainScheduler)
             .map { results in
-              let tuples = Array(results).map { ($0.identifier, $0.phDownloadState) }
-              let stateById = Dictionary(uniqueKeysWithValues: tuples)
-              return Dictionary(uniqueKeysWithValues: identifiers.map { ($0, stateById[$0] ?? .undefined) })
+              let taskById = Array(results).map { ($0.identifier, PhDownloadTask.init(from: $0)) }
+              return Dictionary(uniqueKeysWithValues: taskById)
             }
             .distinctUntilChanged()
         } catch {
