@@ -45,6 +45,7 @@ class ViewController: UIViewController {
 
     self.navigationItem.rightBarButtonItems = [
         .init(title: "Cancel all", style: .plain, target: self, action: #selector(cancelAll)),
+        .init(title: "Remove", style: .plain, target: self, action: #selector(remove)),
     ]
 
     self.tableView.dataSource = self
@@ -97,6 +98,25 @@ class ViewController: UIViewController {
       .cancelAll()
       .subscribe()
       .disposed(by: self.disposeBag)
+  }
+
+  @objc func remove() {
+    let alert = UIAlertController(
+      title: "Remove",
+      message: "Enter identifier need remove",
+      preferredStyle: .alert
+    )
+    alert.addTextField()
+    alert.addAction(.init(title: "Cancel", style: .destructive))
+    alert.addAction(.init(title: "OK", style: .default, handler: { [weak alert, weak self] _ in
+      if let id = alert?.textFields?.first?.text, let self = self {
+        self.downloader
+          .remove(identifier: id, deleteFile: true)
+          .subscribe()
+          .disposed(by: self.disposeBag)
+      }
+    }))
+    self.present(alert, animated: true)
   }
 }
 

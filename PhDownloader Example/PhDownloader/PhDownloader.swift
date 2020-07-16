@@ -40,6 +40,11 @@ public protocol PhDownloader {
 
   /// Cancel all enqueued and running download tasks
   func cancelAll() -> Completable
+
+  /// Delete a download task from database.
+  /// If the given task is running, it is canceled as well.
+  /// If the task is completed and `deleteFile` is true, the downloaded file will be deleted.
+  func remove(identifier: String, deleteFile: Bool) -> Completable
 }
 
 /// It represents downloader errors
@@ -123,9 +128,13 @@ protocol LocalDataSource {
   /// Get single task by id
   func get(by id: String) throws -> DownloadTaskEntity?
 
-  /// Cancel all enqueued or running tasks
+  /// Mask all enqueued or running tasks as cancelled.
   /// - Returns: Cancelled task ids
   func cancelAll() -> Single<[String]>
+
+  /// Remove task from database
+  /// - Returns: a `Single` that emits File savedDir and fileName or error
+  func remove(by id: String) throws -> (savedDir: URL, fileName: String)
 }
 
 extension FileManager {
@@ -177,7 +186,7 @@ public protocol RealmAdapter {
 
   func add(_ object: Object, update: Realm.UpdatePolicy)
 
-  func delete<Element: Object>(_ objects: Results<Element>)
+  func delete(_ object: Object)
 
   func refresh() -> Bool
 
@@ -218,7 +227,6 @@ final class RealLocalDataSource: LocalDataSource {
               if disposable.isDisposed { return }
 
               let realm = try realmInitializer()
-              _ = realm.refresh()
 
               guard let task = Self.find(by: id, in: realm) else {
                 let error = PhDownloaderError.notFound(identifier: id)
@@ -300,9 +308,7 @@ final class RealLocalDataSource: LocalDataSource {
   }
 
   func get(by id: String) throws -> DownloadTaskEntity? {
-    let realm = try self.realmInitializer()
-    _ = realm.refresh()
-    return Self.find(by: id, in: realm)
+    Self.find(by: id, in: try self.realmInitializer())
   }
 
   func cancelAll() -> Single<[String]> {
@@ -338,8 +344,22 @@ final class RealLocalDataSource: LocalDataSource {
       .subscribeOn(self.queryScheduler)
   }
 
+  func remove(by id: String) throws -> (savedDir: URL, fileName: String) {
+    let realm = try self.realmInitializer()
+
+    guard let task = Self.find(by: id, in: realm) else { throw PhDownloaderError.notFound(identifier: id) }
+    let tuple = (savedDir: URL(fileURLWithPath: task.savedDir), fileName: task.fileName)
+
+    try realm.write(withoutNotifying: []) {
+      realm.delete(task)
+    }
+
+    return tuple
+  }
+
   private static func find(by id: String, in realm: RealmAdapter) -> DownloadTaskEntity? {
-    realm.object(ofType: DownloadTaskEntity.self, forPrimaryKey: id)
+    _ = realm.refresh()
+    return realm.object(ofType: DownloadTaskEntity.self, forPrimaryKey: id)
   }
 }
 
@@ -519,6 +539,15 @@ final class RealDownloader: PhDownloader {
     self.options = options
     self.dataSource = dataSource
 
+    NotificationCenter
+      .default
+      .addObserver(
+        self,
+        selector: #selector(applicationWillTerminate),
+        name: UIApplication.willTerminateNotification,
+        object: nil
+      )
+
     self
       .commandS
       .compactMap {
@@ -532,6 +561,36 @@ final class RealDownloader: PhDownloader {
   }
 
   // MARK: Private helpers
+
+  /// Cancel all task. Delete temporary files
+  @objc private func applicationWillTerminate(notification: Notification) {
+    let d = DispatchSemaphore(value: 0)
+
+    _ = self
+      .dataSource
+      .cancelAll()
+      .flatMapCompletable { _ -> Completable in
+          .deferred {
+            let temporaryDirectory = FileManager.default.temporaryDirectory
+            try FileManager.default
+              .contentsOfDirectory(atPath: temporaryDirectory.path)
+              .map { temporaryDirectory.appendingPathComponent($0) }
+              .forEach { try FileManager.default.removeItem(at: $0) }
+            return .empty()
+        }
+      }
+      .subscribe { event in
+        switch event {
+        case .completed:
+          print("[PhDownloader] clean up success")
+        case .error(let error):
+          print("[PhDownloader] clean up failure: \(error)")
+        }
+        d.signal()
+    }
+
+    d.wait()
+  }
 
   /// Execute download request, update local database and send result.
   /// All errors is sent to `downloadResultS` and  is discarded afterwards.
@@ -734,5 +793,28 @@ extension RealDownloader {
           .forEach(commandS.accept)
       })
       .asCompletable()
+  }
+}
+
+// MARK: Remove by identifier
+extension RealDownloader {
+  func remove(identifier: String, deleteFile: Bool) -> Completable {
+    Completable
+      .deferred { [dataSource, commandS] () -> Completable in
+        // remove entity from database
+        let (savedDir, fileName) = try dataSource.remove(by: identifier)
+
+        // remove file if needed
+        let url = savedDir.appendingPathComponent(fileName)
+        if deleteFile, FileManager.default.fileExists(atPath: url.path) {
+          try FileManager.default.removeItem(at: url)
+        }
+
+        // send command to cancel downloading
+        commandS.accept(.cancel(identifier: identifier))
+
+        return .empty()
+      }
+      .subscribeOn(Self.concurrentMainScheduler)
   }
 }
