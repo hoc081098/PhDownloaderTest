@@ -53,8 +53,8 @@ public enum PhDownloaderError: Error, CustomDebugStringConvertible {
   /// Not found download task by identifier.
   case notFound(identifier: String)
 
-  /// Task is not running (completed or failed). So it is can't be cancelled.
-  case taskAlreadyTerminated(identifier: String)
+  /// Task cannot be cancelled
+  case cannotCancel(identifier: String)
 
   public var debugDescription: String {
     switch self {
@@ -64,8 +64,8 @@ public enum PhDownloaderError: Error, CustomDebugStringConvertible {
       return "Database error: \(error)."
     case .notFound(let identifier):
       return "Not found task with identifier: \(identifier)."
-    case .taskAlreadyTerminated(let identifier):
-      return "Task with identifier: \(identifier) already terminated"
+    case .cannotCancel(let identifier):
+      return "Cannot cancel task with identifier: \(identifier). Because state of task is finish (completed, failed or cancelled) or undefined"
     }
   }
 }
@@ -432,6 +432,17 @@ extension PhDownloadTask {
   }
 }
 
+extension DownloadTaskEntity {
+  /// Enqueued or runnning state
+  var canCancel: Bool {
+    if self.phDownloadState == .enqueued { return true }
+    if case .downloading = self.phDownloadState { return true }
+    return false
+  }
+
+  var canDownload: Bool { true }
+}
+
 /// The command that enqueues a download request or cancel by identifier
 enum Command {
   case enqueue(request: PhDownloadRequest)
@@ -544,37 +555,25 @@ final class RealDownloader: PhDownloader {
 
   /// Update local database: Update state of task to cancelled
   private func cancelDownload(_ identifier: String) -> Completable {
-      .create { observer -> Disposable in
-        let disposable = BooleanDisposable()
-        let compositeDisposable = CompositeDisposable()
-        _ = compositeDisposable.insert(disposable)
-
-        DispatchQueue.main.async {
-          do {
-            if disposable.isDisposed { return }
-
-            guard let task = try self.dataSource.get(by: identifier) else {
-              return observer(.error(PhDownloaderError.notFound(identifier: identifier)))
-            }
-
-            guard !Set<PhDownloadState>([.completed, .failed]).contains(task.phDownloadState) else {
-              return observer(.error(PhDownloaderError.taskAlreadyTerminated(identifier: identifier)))
-            }
-
-            if disposable.isDisposed { return }
-
-            _ = compositeDisposable.insert(
-              self.dataSource
-                .update(id: identifier, state: .cancelled)
-                .subscribe(observer)
-            )
-          } catch {
-            observer(.error(PhDownloaderError.databaseError(error)))
+    return Single
+      .deferred { [dataSource] () -> Single<DownloadTaskEntity> in
+        // get task and check can cancel
+        do {
+          guard let task = try dataSource.get(by: identifier) else {
+            return .error(PhDownloaderError.notFound(identifier: identifier))
           }
-        }
 
-        return compositeDisposable
-    }
+          guard task.canCancel else {
+            return .error(PhDownloaderError.cannotCancel(identifier: identifier))
+          }
+
+          return .just(task)
+        } catch {
+          return .error(PhDownloaderError.databaseError(error))
+        }
+      }
+      .subscribeOn(Self.concurrentMainScheduler)
+      .flatMapCompletable { [dataSource] in dataSource.update(id: $0.identifier, state: .cancelled) }
   }
 }
 
