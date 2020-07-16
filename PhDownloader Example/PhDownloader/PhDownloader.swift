@@ -624,7 +624,7 @@ extension RealDownloader {
             )
             .subscribeOn(Self.concurrentMainScheduler)
             .map { results in
-              let taskById = Array(results).map { ($0.identifier, PhDownloadTask.init(from: $0)) }
+              let taskById = results.map { ($0.identifier, PhDownloadTask.init(from: $0)) }
               return Dictionary(uniqueKeysWithValues: taskById)
             }
             .distinctUntilChanged()

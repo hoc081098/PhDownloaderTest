@@ -8,6 +8,7 @@
 
 import Foundation
 
+/// Specifying parameters for work that should be enqueued.
 public struct PhDownloadRequest: Hashable {
 
   /// The unique identifier of download request
