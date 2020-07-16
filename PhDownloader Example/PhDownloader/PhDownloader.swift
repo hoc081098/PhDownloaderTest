@@ -122,6 +122,10 @@ protocol LocalDataSource {
 
   /// Get single task by id
   func get(by id: String) throws -> DownloadTaskEntity?
+
+  /// Cancel all enqueued or running tasks
+  /// - Returns: Cancelled task ids
+  func cancelAll() -> Single<[String]>
 }
 
 extension FileManager {
@@ -190,6 +194,15 @@ final class RealLocalDataSource: LocalDataSource {
   /// OperationQueue that is used to dispatch blocks that updated realm `Object`
   private let queue: OperationQueue
 
+  /// Scheduler that schedule query works
+  private let queryScheduler = ConcurrentDispatchQueueScheduler(
+    queue: .init(
+      label: "RealLocalDataSource.QueryQueue",
+      qos: .userInitiated,
+      attributes: .concurrent
+    )
+  )
+
   init(realmInitializer: @escaping () throws -> RealmAdapter, queue: OperationQueue) {
     self.realmInitializer = realmInitializer
     self.queue = queue
@@ -246,7 +259,6 @@ final class RealLocalDataSource: LocalDataSource {
               if disposable.isDisposed { return }
 
               let realm = try realmInitializer()
-              _ = realm.refresh()
 
               if disposable.isDisposed { return }
 
@@ -288,7 +300,42 @@ final class RealLocalDataSource: LocalDataSource {
   }
 
   func get(by id: String) throws -> DownloadTaskEntity? {
-    Self.find(by: id, in: try self.realmInitializer())
+    let realm = try self.realmInitializer()
+    _ = realm.refresh()
+    return Self.find(by: id, in: realm)
+  }
+
+  func cancelAll() -> Single<[String]> {
+    Single
+      .deferred { () -> Single<[String]> in
+        autoreleasepool {
+          do {
+            let realm = try self.realmInitializer()
+            _ = realm.refresh()
+
+            let entities = realm
+              .objects(DownloadTaskEntity.self)
+              .filter(
+                "SELF.state = %@ OR SELF.state = %@",
+                DownloadTaskEntity.RawState.enqueued.rawValue,
+                DownloadTaskEntity.RawState.downloading.rawValue
+              )
+              .toArray()
+
+            try realm.write(withoutNotifying: []) {
+              entities.forEach { entity in
+                entity.update(to: .cancelled)
+                entity.updatedAt = .init()
+              }
+            }
+
+            return .just(entities.map { $0.identifier })
+          } catch {
+            return .error(PhDownloaderError.databaseError(error))
+          }
+        }
+      }
+      .subscribeOn(self.queryScheduler)
   }
 
   private static func find(by id: String, in realm: RealmAdapter) -> DownloadTaskEntity? {
@@ -678,6 +725,14 @@ extension RealDownloader {
 // MARK: Cancel all
 extension RealDownloader {
   func cancelAll() -> Completable {
-    fatalError()
+    self.dataSource
+      .cancelAll()
+      .observeOn(Self.mainScheduler)
+      .do(onSuccess: { [commandS] ids in
+        ids
+          .map { Command.cancel(identifier: $0) }
+          .forEach(commandS.accept)
+      })
+      .asCompletable()
   }
 }

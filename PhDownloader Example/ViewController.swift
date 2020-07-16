@@ -25,12 +25,12 @@ class ViewController: UIViewController {
 
   private let disposeBag = DisposeBag()
 
-  private lazy var items: [Item] = (0..<500).map { i in
+  private lazy var items: [Item] = (0..<100).map { i in
       .init(
         request: .init(
           identifier: String(i),
           url: URL(string: "https://file-examples-com.github.io/uploads/2017/04/file_example_MP4_1920_18MG.mp4")!,
-          fileName: "test_file_\(i)",
+          fileName: "test_file_\(i).mp4",
           savedDir: FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)
             .first!
@@ -42,6 +42,10 @@ class ViewController: UIViewController {
 
   override func viewDidLoad() {
     super.viewDidLoad()
+
+    self.navigationItem.rightBarButtonItems = [
+        .init(title: "Cancel all", style: .plain, target: self, action: #selector(cancelAll)),
+    ]
 
     self.tableView.dataSource = self
     self.tableView.delegate = self
@@ -86,14 +90,13 @@ class ViewController: UIViewController {
         self.tableView.reloadRows(at: indexPaths, with: .none)
       })
       .disposed(by: self.disposeBag)
+  }
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-      self.items
-        .map { self.downloader.enqueue($0.request) }
-        .reduce(Completable.empty()) { $0.andThen($1) }
-        .subscribe()
-        .disposed(by: self.disposeBag)
-    }
+  @objc func cancelAll() {
+    self.downloader
+      .cancelAll()
+      .subscribe()
+      .disposed(by: self.disposeBag)
   }
 }
 
@@ -116,14 +119,37 @@ extension ViewController: UITableViewDataSource, UITableViewDelegate {
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
 
-    let id = self.items[indexPath.row].request.identifier
-    self.downloader
-      .cancel(by: id)
-      .subscribe(
-        onCompleted: { print("[Cancel] Success: id=\(id)") },
-        onError: { print("[Cancel] Failure: id=\(id), error=\($0)") }
-      )
-      .disposed(by: self.disposeBag)
+    let item = self.items[indexPath.row]
+    let id = item.request.identifier
+
+    switch item.state {
+
+    case .cancelled, .undefined:
+      self.downloader
+        .enqueue(item.request)
+        .subscribe(
+          onCompleted: { print("[Enqueue] Success: id=\(id)") },
+          onError: { print("[Enqueue] Failure: id=\(id), error=\($0)") }
+        )
+        .disposed(by: self.disposeBag)
+
+    case .completed:
+      let url = item.request.savedDir.appendingPathComponent(item.request.fileName)
+      if FileManager.default.fileExists(atPath: url.path) {
+        print("[Completed] url=\(url)")
+      } else {
+        fatalError()
+      }
+
+    default:
+      self.downloader
+        .cancel(by: id)
+        .subscribe(
+          onCompleted: { print("[Cancel] Success: id=\(id)") },
+          onError: { print("[Cancel] Failure: id=\(id), error=\($0)") }
+        )
+        .disposed(by: self.disposeBag)
+    }
   }
 }
 
