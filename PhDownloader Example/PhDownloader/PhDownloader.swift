@@ -562,7 +562,7 @@ final class RealDownloader: PhDownloader {
 
   /// Update local database: Update state of task to cancelled
   private func cancelDownload(_ identifier: String) -> Completable {
-    return Single
+    Single
       .deferred { [dataSource] () -> Single<DownloadTaskEntity> in
         // get task and check can cancel
         do {
