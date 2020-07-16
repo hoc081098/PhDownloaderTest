@@ -82,7 +82,7 @@ public enum PhDownloadResult {
 public enum PhDownloaderFactory {
 
   /// Provide `PhDownloader` from `PhDownloaderOptions`
-  public static func makeDownloader(with options: PhDownloaderOptions) throws -> PhDownloader {
+  public static func makeDownloader(with options: PhDownloaderOptions) -> PhDownloader {
     let queue = OperationQueue()
     queue.maxConcurrentOperationCount = options.maxConcurrent * 2
 
@@ -418,6 +418,7 @@ extension Event where Element == RxProgress {
   }
 }
 
+// MARK: PhDownloadTask + Initializer
 extension PhDownloadTask {
   init(from entity: DownloadTaskEntity) {
     self.init(
@@ -432,6 +433,7 @@ extension PhDownloadTask {
   }
 }
 
+// MARK: DownloadTaskEntity + CanCancel + CanDownload
 extension DownloadTaskEntity {
   /// Enqueued or runnning state
   var canCancel: Bool {
@@ -440,7 +442,7 @@ extension DownloadTaskEntity {
     return false
   }
 
-  var canDownload: Bool { true }
+  var canDownload: Bool { self.phDownloadState != .cancelled }
 }
 
 /// The command that enqueues a download request or cancel by identifier
@@ -489,12 +491,12 @@ final class RealDownloader: PhDownloader {
   /// - Parameter request: Download request
   /// - Returns: a Completable that always completed
   private func executeDownload(_ request: PhDownloadRequest) -> Completable {
-    var isCompleted = false
+    Completable
+      .deferred { [downloadResultS, dataSource] () -> Completable in
 
-    return Observable
-      .deferred { [dataSource] () -> Observable<DownloadRequest> in
-        // already cancelled before
-        if (try dataSource.get(by: request.identifier))?.phDownloadState == .cancelled {
+        // check already cancelled before
+        guard let task = try dataSource.get(by: request.identifier), task.canDownload else {
+          print("[PhDownloader] Task with identifier: \(request.identifier) does not exist or cancelled")
           return .empty()
         }
 
@@ -505,42 +507,47 @@ final class RealDownloader: PhDownloader {
             [.createIntermediateDirectories, .removePreviousFile]
           )
         }
-        return RxAlamofire.download(urlRequest, to: destination)
-      }
-      .subscribeOn(Self.concurrentMainScheduler)
-      .flatMap { $0.rx.progress() }
-      .observeOn(Self.mainScheduler)
-      .do(onCompleted: { isCompleted = true })
-      .takeUntil(self.cancelCommand(for: request.identifier))
-      .throttle(self.options.throttleProgress, latest: true, scheduler: self.throttleScheduler)
-      .distinctUntilChanged()
-      .materialize()
-      .observeOn(Self.mainScheduler)
-      .map { (state: $0.asDownloadState(isCompleted), error: $0.error) }
-      .do(
-        onNext: { [downloadResultS] (state, error) in
-          if case .completed = state {
-            downloadResultS.accept(.success(request))
+
+        // Is task completed naturally
+        var isCompleted = false
+
+        return RxAlamofire
+          .download(urlRequest, to: destination)
+          .flatMap { $0.rx.progress() }
+          .observeOn(Self.mainScheduler)
+          .do(onCompleted: { isCompleted = true })
+          .takeUntil(self.cancelCommand(for: request.identifier))
+          .throttle(self.options.throttleProgress, latest: true, scheduler: self.throttleScheduler)
+          .distinctUntilChanged()
+          .materialize()
+          .observeOn(Self.mainScheduler)
+          .map { (state: $0.asDownloadState(isCompleted), error: $0.error) }
+          .do(
+            onNext: { (state, error) in
+              if case .completed = state {
+                downloadResultS.accept(.success(request))
+              }
+              else if case .cancelled = state {
+                downloadResultS.accept(.cancelled(request))
+              }
+              else if case .failed = state, let error = error {
+                downloadResultS.accept(.failure(request, .downloadError(error)))
+              }
+            }
+          )
+          .concatMap { (state, _) -> Completable in
+            dataSource.update(
+              id: request.identifier,
+              state: state
+            )
           }
-          else if case .cancelled = state {
-            downloadResultS.accept(.cancelled(request))
-          }
-          else if case .failed = state, let error = error {
-            downloadResultS.accept(.failure(request, .downloadError(error)))
-          }
-        }
-      )
-      .concatMap { [dataSource] (state, _) -> Completable in
-        dataSource.update(
-          id: request.identifier,
-          state: state
-        )
+          .asCompletable()
       }
       .catchError { error in
         print("[PhDownloader] Unhandle error: \(error)")
         return .empty()
       }
-      .asCompletable()
+      .subscribeOn(Self.concurrentMainScheduler)
   }
 
   /// Filter command cancel task that has id equals to `identifierNeedCancel`

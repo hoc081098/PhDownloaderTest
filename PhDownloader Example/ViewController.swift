@@ -18,7 +18,7 @@ class ViewController: UIViewController {
 
   @IBOutlet weak var tableView: UITableView!
 
-  private let downloader: PhDownloader = try! PhDownloaderFactory.makeDownloader(with: .init(
+  private let downloader: PhDownloader = PhDownloaderFactory.makeDownloader(with: .init(
     maxConcurrent: 2,
     throttleProgress: .milliseconds(500))
   )
